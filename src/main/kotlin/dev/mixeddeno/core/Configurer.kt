@@ -27,21 +27,21 @@ class Configurer(private val root: Path) {
       ScopeKind.DENO -> configureDeno(s)
       ScopeKind.WEB -> if (web) configureWeb(s)
     }
-    if (ws.scopes.any { it.kind == ScopeKind.DENO }) updateGitignore()
+    if (ws.scopes.any { it.kind == ScopeKind.DENO }) hideFromGit()
     return changes
   }
 
-  private fun updateGitignore() {
-    val gi = root.resolve(".gitignore")
-    if (!gi.exists() && !root.resolve(".git").exists()) return
-    val text = if (gi.exists()) Files.readString(gi) else ""
-    val lines = text.lines().map { it.trim() }
-    val wanted = listOf("${Generator.OUT_DIR}/", "**/${Generator.DENO_TSCONFIG}", "**/${Generator.UNIVERSAL_TSCONFIG}")
-    val missing = wanted.filter { it !in lines }
-    if (missing.isEmpty()) return
-    val prefix = if (text.isEmpty() || text.endsWith("\n")) "" else "\n"
-    Files.writeString(gi, text + prefix + "# Mixed Deno Types (generated, machine-specific)\n" + missing.joinToString("\n") + "\n")
-    changes += "updated .gitignore"
+  private val git = GitLocal(root)
+  private val created = mutableListOf<Path>()
+  private val edited = mutableListOf<Path>()
+
+  /** Hide everything the plugin writes from git, locally (.git/info/exclude + skip-worktree). */
+  private fun hideFromGit() {
+    if (!git.available) return
+    val patterns = mutableListOf("${Generator.OUT_DIR}/", Generator.DENO_TSCONFIG, Generator.UNIVERSAL_TSCONFIG)
+    patterns += created.map { git.anchored(it) }
+    if (git.exclude(patterns)) changes += "hid generated files from git (.git/info/exclude, not committed)"
+    for (f in edited) if (git.isTracked(f) && git.skipWorktree(f)) changes += "git: ${rel(f)} marked --skip-worktree (your local edit is never committed)"
   }
 
   private fun rel(p: Path) = root.relativize(p).toString().replace('\\', '/')
@@ -51,6 +51,7 @@ class Configurer(private val root: Path) {
     val extends = "./${Generator.DENO_TSCONFIG}"
     if (!file.exists()) {
       Json.write(file, JsonObject().apply { addProperty("extends", extends) })
+      created.add(file)
       changes += "created ${rel(file)}"
       return
     }
@@ -79,6 +80,7 @@ class Configurer(private val root: Path) {
     json.get("exclude")?.let { out.add("exclude", it) }
     for ((k, v) in json.entrySet()) if (k !in setOf("extends", "compilerOptions", "include", "files", "exclude")) out.add(k, v)
     Json.write(file, out)
+    edited.add(file)
     changes += "updated ${rel(file)} (extends $extends; removed lib/types/paths/baseUrl/module options)"
   }
 
@@ -99,6 +101,7 @@ class Configurer(private val root: Path) {
     }
     if (changed) {
       Json.write(file, json)
+      edited.add(file)
       changes += "updated ${rel(file)} (include src, vite/client types: no Node globals in browser code)"
     }
     val viteConfig = listOf("vite.config.ts", "vite.config.mts").map { scope.dir.resolve(it) }.firstOrNull { it.exists() }
@@ -115,6 +118,7 @@ class Configurer(private val root: Path) {
         })
         add("include", Json.array(listOf(viteConfig.fileName.toString())))
       })
+      created.add(nodeConfig)
       changes += "created ${rel(nodeConfig)}"
     }
   }

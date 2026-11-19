@@ -41,8 +41,10 @@ Everything regenerates automatically when `deno.json`, `deno.lock`, `package.jso
    - makes each Deno scope's `tsconfig.json` extend `./tsconfig.deno.json` (creating it if missing) and removes
      `lib`, `types`, `paths`, `baseUrl`, `target` and `module` options that would override it
      (WebStorm always uses the nearest `tsconfig.json`, so this is required),
-   - adds `.deno-types/`, `**/tsconfig.deno.json`, `**/tsconfig.universal.json` to `.gitignore`
-     (generated files contain paths to your local Deno cache),
+   - keeps all of this invisible to git, locally only: generated and created files go to `.git/info/exclude`,
+     and edited tracked `tsconfig.json` files are marked `git update-index --skip-worktree`.
+     Nothing is committed, so developers without the plugin see the repo exactly as before.
+     (To undo: `git update-index --no-skip-worktree <file>` and `git checkout <file>`.)
    - generates the types.
 
    Automatic tsconfig changes can be turned off in Settings › Languages & Frameworks › Mixed Deno Types.
