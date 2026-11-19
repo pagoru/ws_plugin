@@ -104,6 +104,24 @@ class Configurer(private val root: Path) {
     return changes
   }
 
+  /** Adds `paths` for packages that shared code (outside the app) imports, pointing at the app's node_modules. */
+  fun applyWebPaths(webPaths: Map<Path, Map<String, List<String>>>): List<String> {
+    for ((config, entries) in webPaths) {
+      if (entries.isEmpty()) continue
+      val json = Json.readObject(config) ?: continue
+      val co = json.obj("compilerOptions") ?: JsonObject().also { json.add("compilerOptions", it) }
+      val paths = co.obj("paths") ?: JsonObject().also { co.add("paths", it) }
+      val added = entries.filterKeys { !paths.has(it) }
+      if (added.isEmpty()) continue
+      for ((k, v) in added) paths.add(k, Json.array(v))
+      Json.write(config, json)
+      edited.add(config)
+      changes += "${rel(config)}: paths for ${added.keys.filter { !it.endsWith("/*") }.joinToString()} (used by shared code) -> this app's node_modules"
+    }
+    hideFromGit()
+    return changes
+  }
+
   private fun rel(p: Path) = root.relativize(p).toString().replace('\\', '/')
 
   private fun configureDeno(scope: Scope) {

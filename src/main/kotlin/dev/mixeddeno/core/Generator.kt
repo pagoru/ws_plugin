@@ -18,6 +18,8 @@ class GenerationResult(
   val scopes: List<Scope>,
   /** folders with deno.json + package.json -> their Deno-only files (excluded from that folder's tsconfig.json) */
   val dualSplits: Map<Path, List<Path>>,
+  /** app tsconfig.json -> paths it needs for packages used by shared code it imports */
+  val webPaths: Map<Path, Map<String, List<String>>>,
   val written: List<Path>,
   val problems: List<Problem>,
   val externalRoots: Set<Path>,
@@ -39,6 +41,8 @@ class Generator(private val root: Path, private val deno: DenoCli) {
   private val problems = mutableListOf<Problem>()
   private val externalRoots = linkedSetOf<Path>()
   private val dualSplits = linkedMapOf<Path, List<Path>>()
+  /** Deno scope -> web folders whose code imports it (their node_modules serve bare imports of shared code). */
+  private val importers = HashMap<Scope, LinkedHashSet<Path>>()
   private val typesDir = root.resolve(OUT_DIR)
   private val sourceCache = HashMap<Path, String>()
 
@@ -106,7 +110,7 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     workspace = ws
     val denoScopes = ws.scopes.filter { it.kind == ScopeKind.DENO }
     log += "Scopes: " + ws.scopes.joinToString { "${it.kind.name.lowercase()} ${relRoot(it.dir).ifEmpty { "." }}" }
-    if (denoScopes.isEmpty()) return GenerationResult(ws.scopes, dualSplits, written, problems, externalRoots, log)
+    if (denoScopes.isEmpty()) return GenerationResult(ws.scopes, dualSplits, webPaths, written, problems, externalRoots, log)
 
     Files.createDirectories(typesDir)
     writeText(typesDir.resolve(".gitignore"), "*\n")
@@ -128,14 +132,14 @@ class Generator(private val root: Path, private val deno: DenoCli) {
       }
     }
     writeReport(ws)
-    return GenerationResult(ws.scopes, dualSplits, written, problems, externalRoots, log)
+    return GenerationResult(ws.scopes, dualSplits, webPaths, written, problems, externalRoots, log)
   }
 
   private fun generateScope(ws: Workspace, scope: Scope, denoDts: Path, universal: Set<Path>) {
     // 1. Walk the scope's own files plus anything reachable through the import map (e.g. ../shared).
     //    Like Deno, each file's bare specifiers resolve with the import map of its nearest deno.json.
     val visited = linkedSetOf<Path>()
-    val denoFiles = if (scope.isDual) dualDenoFiles(scope) else scope.files.filter { !it.name.endsWith(".d.ts") }
+    val denoFiles = if (scope.isDual) dualDenoFiles(scope) else scope.files.filter { !it.name.endsWith(".d.ts") && it !in universal }
     val queue = ArrayDeque(denoFiles)
     val bareToExternal = linkedMapOf<String, String>()   // specifier as written -> full external specifier
     val bareFile = HashMap<String, Path>()
@@ -233,6 +237,28 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     if (universal.isNotEmpty()) {
       val uniPaths = JsonObject()
       for ((prefix, dir) in scope.importMap.localPrefixes()) uniPaths.add("$prefix*", Json.array(listOf(rel(scope.dir, dir) + "/*")))
+      // bare package imports (react, dayjs, ...) come from the node_modules of the folders that import this code
+      val nodeModules = importers[scope].orEmpty().map { it.resolve("node_modules") }.filter { it.exists() }
+      val packages = universalPackages(scope, universal)
+      for (pkg in packages) {
+        val dirs = packageDirs(nodeModules, pkg)
+        if (dirs.isEmpty()) continue
+        uniPaths.add(pkg, Json.array(dirs.map { rel(scope.dir, it) }))
+        uniPaths.add("$pkg/*", Json.array(dirs.map { rel(scope.dir, it) + "/*" }))
+      }
+      // the importing apps also need them: shared files resolve bare imports from their own folder otherwise
+      for (imp in importers[scope].orEmpty()) {
+        val config = imp.resolve("tsconfig.json").takeIf { it.exists() } ?: continue
+        val co = Json.readObject(config)?.obj("compilerOptions")
+        val base = co?.str("baseUrl")?.let { imp.resolve(it).normalize() } ?: imp
+        val map = webPaths.getOrPut(config) { linkedMapOf() }
+        for (pkg in packages) {
+          val dirs = packageDirs(listOf(imp.resolve("node_modules")), pkg)
+          if (dirs.isEmpty()) continue
+          map[pkg] = dirs.map { rel(base, it) }
+          map["$pkg/*"] = dirs.map { rel(base, it) + "/*" }
+        }
+      }
       val uni = JsonObject().apply {
         addProperty("//", "$MARKER Files here are imported by browser code: no Deno APIs, no jsr:/npm: imports.")
         add("compilerOptions", JsonObject().apply {
@@ -240,6 +266,7 @@ class Generator(private val root: Path, private val deno: DenoCli) {
           addProperty("module", "esnext")
           addProperty("moduleResolution", "bundler")
           add("lib", Json.array(listOf("esnext", "DOM", "DOM.Iterable")))
+          addProperty("jsx", userCo?.str("jsx") ?: "react-jsx")
           add("types", JsonArray())
           addProperty("allowImportingTsExtensions", true)
           addProperty("noEmit", true)
@@ -425,6 +452,12 @@ class Generator(private val root: Path, private val deno: DenoCli) {
         }
       }
     }
+    // .tsx/.jsx in a Deno folder is browser code: universal unless it uses Deno
+    for (scope in ws.scopes.filter { it.kind == ScopeKind.DENO && !it.isDual }) {
+      for (f in scope.files) if ((f.name.endsWith(".tsx") || f.name.endsWith(".jsx")) && denoReason(scope, f) == null) {
+        result.getOrPut(scope) { linkedSetOf() }.add(f)
+      }
+    }
     // close universal sets over their own local imports
     for ((scope, set) in result) {
       val queue = ArrayDeque(set)
@@ -440,6 +473,23 @@ class Generator(private val root: Path, private val deno: DenoCli) {
   }
 
   private val denoOnlyCache = HashMap<Path, String?>()
+  private val webPaths = linkedMapOf<Path, MutableMap<String, List<String>>>()
+
+  private fun universalPackages(scope: Scope, universal: Set<Path>): Set<String> {
+    val packages = sortedSetOf<String>()
+    for (f in universal) for (spec in ImportScanner.scan(read(f))) {
+      if (ImportScanner.isRelative(spec) || ImportScanner.isExternal(spec) || ImportScanner.isNode(spec)) continue
+      if (scope.importMap.resolve(spec) != null) continue
+      packages += if (spec.startsWith("@")) spec.split('/').take(2).joinToString("/") else spec.substringBefore('/')
+    }
+    if (universal.any { it.name.endsWith(".tsx") || it.name.endsWith(".jsx") }) packages += "react"
+    return packages
+  }
+
+  private fun packageDirs(nodeModules: List<Path>, pkg: String): List<Path> {
+    val typesName = "@types/" + (if (pkg.startsWith("@")) pkg.removePrefix("@").replace("/", "__") else pkg)
+    return nodeModules.flatMap { nm -> listOf(nm.resolve(typesName), nm.resolve(pkg)) }.filter { it.exists() }
+  }
 
   /** Why [f] can only run on Deno (Deno APIs, jsr:/https:/npm: specifiers, or importing such a file); null if it is portable. */
   fun denoReason(scope: Scope, f: Path, stack: MutableSet<Path> = linkedSetOf()): String? {
@@ -476,7 +526,10 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     val owner = ws.scopeOf(target) ?: return
     if (owner.kind != ScopeKind.DENO) return
     val reason = denoReason(owner, target, linkedSetOf())
-    if (reason == null) { if (!owner.isDual) result.getOrPut(owner) { linkedSetOf() }.add(target) }
+    if (reason == null) {
+      if (!owner.isDual) result.getOrPut(owner) { linkedSetOf() }.add(target)
+      ws.scopeOf(from)?.let { importers.getOrPut(owner) { linkedSetOf() }.add(it.dir) }
+    }
     else problems += Problem(from.toString(), spec, "Browser code imports Deno-only module ${relRoot(target)}: it $reason")
   }
 
