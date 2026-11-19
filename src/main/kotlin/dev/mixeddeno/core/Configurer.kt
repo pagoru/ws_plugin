@@ -44,9 +44,70 @@ class Configurer(private val root: Path) {
     for (f in edited) if (git.isTracked(f) && git.skipWorktree(f)) changes += "git: ${rel(f)} marked --skip-worktree (your local edit is never committed)"
   }
 
+  /**
+   * Folders with deno.json + package.json: their tsconfig.json stays the package.json (browser/Node) config,
+   * minus the Deno-only files, which go to tsconfig.deno.json. The user's original `exclude` is remembered
+   * in .deno-types/state.json so the list can be recomputed.
+   */
+  fun applyDualSplits(splits: Map<Path, List<Path>>): List<String> {
+    if (splits.isEmpty()) return changes
+    val stateFile = root.resolve(Generator.OUT_DIR).resolve("state.json")
+    val state = Json.readObject(stateFile) ?: JsonObject()
+    for ((dir, denoFiles) in splits) {
+      val file = dir.resolve("tsconfig.json")
+      val key = rel(file)
+      val denoRel = denoFiles.map { dir.relativize(it).toString().replace('\\', '/') }.sorted()
+      var json = if (file.exists()) Json.readObject(file) else null
+      if (json == null) {
+        json = JsonObject().apply {
+          add("compilerOptions", JsonObject().apply {
+            addProperty("target", "esnext")
+            addProperty("module", "esnext")
+            addProperty("moduleResolution", "bundler")
+            add("lib", Json.array(listOf("esnext", "DOM", "DOM.Iterable")))
+            addProperty("jsx", "react-jsx")
+            addProperty("allowImportingTsExtensions", true)
+            addProperty("noEmit", true)
+            addProperty("skipLibCheck", true)
+            addProperty("isolatedModules", true)
+            addProperty("strict", true)
+          })
+        }
+        created.add(file)
+      }
+      // undo an older plugin version that made this tsconfig.json extend the Deno config
+      val ext = json.get("extends")
+      val deno = "./${Generator.DENO_TSCONFIG}"
+      if (ext != null && (ext.isJsonPrimitive && ext.asString == deno || ext.isJsonArray && ext.asJsonArray.any { it.asString == deno })) {
+        val original = git.headContent(file)?.let { Json.parseObject(it) }
+        if (original != null) json = original
+        else if (ext.isJsonArray) json.add("extends", Json.array(ext.asJsonArray.map { it.asString }.filter { it != deno }))
+        else json.remove("extends")
+      }
+      val entry = state.obj(key) ?: JsonObject().also { e ->
+        json.get("exclude")?.let { e.add("exclude", it) } ?: e.addProperty("noExclude", true)
+        state.add(key, e)
+      }
+      val base = entry.get("exclude")?.takeIf { it.isJsonArray }?.asJsonArray?.map { it.asString } ?: listOf("node_modules")
+      val newExclude = Json.array(base + denoRel.filter { it !in base })
+      if (json.get("exclude") != newExclude || file !in created && !file.exists()) {
+        json.add("exclude", newExclude)
+        Json.write(file, json)
+        if (file !in created) edited.add(file)
+        changes += "${rel(file)}: ${denoRel.size} Deno file(s) moved to ${Generator.DENO_TSCONFIG}, the rest stays on package.json"
+      } else if (file in created) {
+        Json.write(file, json)
+      }
+    }
+    Json.write(stateFile, state)
+    hideFromGit()
+    return changes
+  }
+
   private fun rel(p: Path) = root.relativize(p).toString().replace('\\', '/')
 
   private fun configureDeno(scope: Scope) {
+    if (scope.isDual) return // handled by applyDualSplits after generation
     val file = scope.dir.resolve("tsconfig.json")
     val extends = "./${Generator.DENO_TSCONFIG}"
     if (!file.exists()) {

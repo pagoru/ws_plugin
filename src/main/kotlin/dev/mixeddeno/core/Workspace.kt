@@ -19,6 +19,26 @@ enum class ScopeKind { DENO, WEB }
  */
 class Scope(val kind: ScopeKind, val dir: Path, val config: Path?, val importMap: ImportMap, val denoJson: JsonObject?) {
   val files = mutableListOf<Path>()
+
+  /** package.json in the same folder (Deno also resolves bare imports through it). */
+  val packageJson: JsonObject? = dir.resolve("package.json").takeIf { it.exists() }?.let { Json.readObject(it) }
+
+  /** A Deno scope that also has a package.json: browser/Node files (.tsx, no Deno APIs) live next to Deno files. */
+  val isDual: Boolean get() = kind == ScopeKind.DENO && packageJson != null
+
+  val npmDeps: Set<String> by lazy {
+    val pkg = packageJson ?: return@lazy emptySet()
+    listOf("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+      .flatMap { pkg.obj(it)?.keySet().orEmpty() }.toSet()
+  }
+
+  /** True if [spec] is a package from package.json / node_modules of this folder. */
+  fun isPackageImport(spec: String): Boolean {
+    if (packageJson == null) return false
+    val name = if (spec.startsWith("@")) spec.split('/').take(2).joinToString("/") else spec.substringBefore('/')
+    return name in npmDeps || dir.resolve("node_modules").resolve(name).exists() ||
+      (!name.startsWith("@types/") && dir.resolve("node_modules/@types").resolve(name.removePrefix("@").replace('/', '_').let { if (name.startsWith("@")) it.replaceFirst("_", "__") else it }).exists())
+  }
   override fun toString() = "$kind:$dir"
 }
 

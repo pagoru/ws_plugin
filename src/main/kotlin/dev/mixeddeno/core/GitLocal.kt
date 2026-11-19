@@ -26,6 +26,13 @@ class GitLocal(private val root: Path) {
 
   fun isTracked(file: Path): Boolean = git("ls-files", "--error-unmatch", file.toString())?.first == 0
 
+  /** The committed content of [file] at HEAD, or null. */
+  fun headContent(file: Path): String? {
+    val top = topLevel ?: return null
+    val rel = top.relativize(file.toAbsolutePath().normalize()).toString().replace('\\', '/')
+    return git("show", "HEAD:$rel")?.takeIf { it.first == 0 }?.second
+  }
+
   /** Hide local edits of a tracked file from `git status` / commits. */
   fun skipWorktree(file: Path): Boolean = git("update-index", "--skip-worktree", file.toString())?.first == 0
 

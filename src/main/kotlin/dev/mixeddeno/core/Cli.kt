@@ -14,6 +14,7 @@ fun main(args: Array<String>) {
   val deno = DenoProcess.locate(denoArg) ?: run { System.err.println("deno not found"); exitProcess(2) }
   if ("--configure" in args) Configurer(root).run().forEach { println("configure: $it") }
   val result = Generator(root, DenoProcess(deno)).run()
+  if ("--configure" in args) Configurer(root).applyDualSplits(result.dualSplits).forEach { println("configure: $it") }
   result.log.forEach { println(it) }
   result.problems.forEach { println("problem: ${root.relativize(Path.of(it.file))} '${it.specifier}': ${it.message}") }
   println("${result.written.size} file(s) written")

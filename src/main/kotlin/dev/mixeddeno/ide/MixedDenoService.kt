@@ -86,11 +86,15 @@ class MixedDenoService(private val project: Project) : Disposable {
           }
           indicator.text = "Resolving jsr:/npm: modules with deno info"
           val result = Generator(root, DenoProcess(deno)).run()
+          if (MixedDenoSettings.get(project).state.autoConfigure && result.dualSplits.isNotEmpty()) {
+            val changes = Configurer(root).applyDualSplits(result.dualSplits)
+            if (changes.isNotEmpty()) notify("Split deno.json + package.json folders:<br>" + changes.joinToString("<br>"), NotificationType.INFORMATION)
+          }
           lastFingerprint = fp
           problemsByFile = result.problems.groupBy { it.file }
           val rootsChanged = externalRoots != result.externalRoots
           externalRoots = result.externalRoots
-          LocalFileSystem.getInstance().refreshNioFiles(result.written + root.resolve(Generator.OUT_DIR), true, true) {
+          LocalFileSystem.getInstance().refreshNioFiles(result.written + root.resolve(Generator.OUT_DIR) + result.dualSplits.keys.map { it.resolve("tsconfig.json") }, true, true) {
             ApplicationManager.getApplication().invokeLater({
               if (project.isDisposed) return@invokeLater
               if (rootsChanged) ApplicationManager.getApplication().runWriteAction {

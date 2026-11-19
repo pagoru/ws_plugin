@@ -16,6 +16,8 @@ data class Problem(val file: String, val specifier: String, val message: String)
 
 class GenerationResult(
   val scopes: List<Scope>,
+  /** folders with deno.json + package.json -> their Deno-only files (excluded from that folder's tsconfig.json) */
+  val dualSplits: Map<Path, List<Path>>,
   val written: List<Path>,
   val problems: List<Problem>,
   val externalRoots: Set<Path>,
@@ -36,6 +38,7 @@ class Generator(private val root: Path, private val deno: DenoCli) {
   private val written = mutableListOf<Path>()
   private val problems = mutableListOf<Problem>()
   private val externalRoots = linkedSetOf<Path>()
+  private val dualSplits = linkedMapOf<Path, List<Path>>()
   private val typesDir = root.resolve(OUT_DIR)
   private val sourceCache = HashMap<Path, String>()
 
@@ -83,6 +86,8 @@ class Generator(private val root: Path, private val deno: DenoCli) {
   data class FileRes(val path: Path) : Res
   data class ExtRes(val specifier: String) : Res
   data object Missing : Res
+  /** Bare import served by package.json / node_modules of a folder that has both deno.json and package.json. */
+  data object PackageRes : Res
 
   private fun resolveDeno(scope: Scope, from: Path, spec: String): Res {
     if (ImportScanner.isRelative(spec)) return existing(from.parent.resolve(spec).normalize())?.let { FileRes(it) } ?: Missing
@@ -90,7 +95,7 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     return when (val t = scope.importMap.resolve(spec)) {
       is ImportMap.External -> ExtRes(t.specifier)
       is ImportMap.Local -> existing(t.path)?.let { FileRes(it) } ?: Missing
-      null -> Missing
+      null -> if (scope.isPackageImport(spec)) PackageRes else Missing
     }
   }
 
@@ -98,9 +103,10 @@ class Generator(private val root: Path, private val deno: DenoCli) {
 
   fun run(): GenerationResult {
     val ws = Workspace.scan(root)
+    workspace = ws
     val denoScopes = ws.scopes.filter { it.kind == ScopeKind.DENO }
     log += "Scopes: " + ws.scopes.joinToString { "${it.kind.name.lowercase()} ${relRoot(it.dir).ifEmpty { "." }}" }
-    if (denoScopes.isEmpty()) return GenerationResult(ws.scopes, written, problems, externalRoots, log)
+    if (denoScopes.isEmpty()) return GenerationResult(ws.scopes, dualSplits, written, problems, externalRoots, log)
 
     Files.createDirectories(typesDir)
     writeText(typesDir.resolve(".gitignore"), "*\n")
@@ -122,14 +128,15 @@ class Generator(private val root: Path, private val deno: DenoCli) {
       }
     }
     writeReport(ws)
-    return GenerationResult(ws.scopes, written, problems, externalRoots, log)
+    return GenerationResult(ws.scopes, dualSplits, written, problems, externalRoots, log)
   }
 
   private fun generateScope(ws: Workspace, scope: Scope, denoDts: Path, universal: Set<Path>) {
     // 1. Walk the scope's own files plus anything reachable through the import map (e.g. ../shared).
     //    Like Deno, each file's bare specifiers resolve with the import map of its nearest deno.json.
     val visited = linkedSetOf<Path>()
-    val queue = ArrayDeque(scope.files.filter { !it.name.endsWith(".d.ts") })
+    val denoFiles = if (scope.isDual) dualDenoFiles(scope) else scope.files.filter { !it.name.endsWith(".d.ts") }
+    val queue = ArrayDeque(denoFiles)
     val bareToExternal = linkedMapOf<String, String>()   // specifier as written -> full external specifier
     val bareFile = HashMap<String, Path>()
     var usesNode = false
@@ -145,6 +152,7 @@ class Generator(private val root: Path, private val deno: DenoCli) {
           is ExtRes -> {
             if (ImportScanner.isNode(r.specifier)) usesNode = true else { bareToExternal[spec] = r.specifier; bareFile.putIfAbsent(spec, f) }
           }
+          PackageRes -> {}
           Missing -> if (!ImportScanner.isRelative(spec)) {
             problems += Problem(f.toString(), spec, "'$spec' is not in the import map of ${relRoot(owner.config!!)}")
           }
@@ -205,8 +213,18 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     val tsconfig = JsonObject().apply {
       addProperty("//", MARKER)
       add("compilerOptions", co)
-      add("include", Json.array(include))
-      add("exclude", Json.array(exclude))
+      if (scope.isDual) {
+        // only the Deno files; the rest of the folder is typed by its own tsconfig.json (package.json side)
+        val files = denoFiles.map { rel(scope.dir, it) } + rel(scope.dir, denoDts) + listOfNotNull(graph.nodeTypes?.toTarget(scope))
+        add("files", Json.array(files))
+      } else {
+        add("include", Json.array(include))
+        add("exclude", Json.array(exclude))
+      }
+    }
+    if (scope.isDual) {
+      dualSplits[scope.dir] = denoFiles
+      log += "${relRoot(scope.dir).ifEmpty { "." }}: deno.json + package.json, ${denoFiles.size} Deno file(s), ${scope.files.size - denoFiles.size} package.json file(s)"
     }
     if (Json.write(scope.dir.resolve(DENO_TSCONFIG), tsconfig)) written.add(scope.dir.resolve(DENO_TSCONFIG))
 
@@ -389,39 +407,20 @@ class Generator(private val root: Path, private val deno: DenoCli) {
    */
   private fun classifyShared(ws: Workspace): Map<Scope, Set<Path>> {
     val result = HashMap<Scope, MutableSet<Path>>()
-    val denoOnlyCache = HashMap<Path, String?>()
-
-    fun denoReason(scope: Scope, f: Path, stack: MutableSet<Path>): String? {
-      denoOnlyCache[f]?.let { return it }
-      if (f in denoOnlyCache) return null
-      if (!stack.add(f)) return null
-      val src = read(f)
-      var reason: String? = if (ImportScanner.usesDenoGlobal(src)) "uses Deno.* APIs" else null
-      if (reason == null) for (spec in ImportScanner.scan(src)) {
-        when (val r = resolveDeno(scope, f, spec)) {
-          is ExtRes -> { reason = "imports '$spec' (${r.specifier})"; break }
-          is FileRes -> denoReason(scope, r.path, stack)?.let { reason = "imports '$spec', which $it"; }
-          Missing -> {}
-        }
-        if (reason != null) break
-      }
-      stack.remove(f)
-      denoOnlyCache[f] = reason
-      return reason
-    }
-
-    for (web in ws.scopes.filter { it.kind == ScopeKind.WEB }) {
-      val resolver = WebResolver(web)
-      for (f in web.files) {
+    for (web in ws.scopes.filter { it.kind == ScopeKind.WEB || it.isDual }) {
+      val resolver = if (web.kind == ScopeKind.WEB) WebResolver(web)
+        else web.dir.resolve("tsconfig.json").takeIf { it.exists() }?.let { WebResolver(web, it) }
+      val webFiles = if (web.isDual) (web.files - dualDenoFiles(web).toSet()).filter { !it.name.endsWith(".d.ts") } else web.files
+      for (f in webFiles) {
         for (spec in ImportScanner.scan(read(f))) {
           if (ImportScanner.isRelative(spec)) {
             // relative import escaping the web scope
             val p = existing(f.parent.resolve(spec).normalize()) ?: continue
-            if (p.startsWith(web.dir)) continue
-            checkWebImport(ws, f, spec, p, result, ::denoReason)
+            if (p.startsWith(web.dir) && !web.isDual) continue
+            checkWebImport(ws, f, spec, p, result) { sc, file, st -> denoReason(sc, file, st) }
           } else {
-            val p = resolver.resolve(spec).firstNotNullOfOrNull { existing(it) } ?: continue
-            checkWebImport(ws, f, spec, p, result, ::denoReason)
+            val p = resolver?.resolve(spec)?.firstNotNullOfOrNull { existing(it) } ?: continue
+            checkWebImport(ws, f, spec, p, result) { sc, file, st -> denoReason(sc, file, st) }
           }
         }
       }
@@ -440,6 +439,36 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     return result
   }
 
+  private val denoOnlyCache = HashMap<Path, String?>()
+
+  /** Why [f] can only run on Deno (Deno APIs, jsr:/https:/npm: specifiers, or importing such a file); null if it is portable. */
+  fun denoReason(scope: Scope, f: Path, stack: MutableSet<Path> = linkedSetOf()): String? {
+    if (f in denoOnlyCache) return denoOnlyCache[f]
+    if (!stack.add(f)) return null
+    val owner = workspace?.scopeOf(f)?.takeIf { it.kind == ScopeKind.DENO } ?: scope
+    val src = read(f)
+    var reason: String? = if (ImportScanner.usesDenoGlobal(src)) "uses Deno.* APIs" else null
+    if (reason == null) for (spec in ImportScanner.scan(src)) {
+      when (val r = resolveDeno(owner, f, spec)) {
+        is ExtRes -> if (!ImportScanner.isNode(r.specifier) || !owner.isDual) reason = "imports '$spec' (${r.specifier})"
+        is FileRes -> denoReason(owner, r.path, stack)?.let { reason = "imports '$spec', which $it" }
+        Missing, PackageRes -> {}
+      }
+      if (reason != null) break
+    }
+    stack.remove(f)
+    denoOnlyCache[f] = reason
+    return reason
+  }
+
+  /** Deno files of a dual folder: not .tsx/.jsx and Deno-only. Everything else there belongs to package.json / tsconfig.json. */
+  fun dualDenoFiles(scope: Scope): List<Path> = scope.files.filter {
+    val n = it.name
+    !n.endsWith(".tsx") && !n.endsWith(".jsx") && !n.endsWith(".d.ts") && denoReason(scope, it) != null
+  }
+
+  private var workspace: Workspace? = null
+
   private fun checkWebImport(
     ws: Workspace, from: Path, spec: String, target: Path,
     result: HashMap<Scope, MutableSet<Path>>, denoReason: (Scope, Path, MutableSet<Path>) -> String?,
@@ -447,7 +476,7 @@ class Generator(private val root: Path, private val deno: DenoCli) {
     val owner = ws.scopeOf(target) ?: return
     if (owner.kind != ScopeKind.DENO) return
     val reason = denoReason(owner, target, linkedSetOf())
-    if (reason == null) result.getOrPut(owner) { linkedSetOf() }.add(target)
+    if (reason == null) { if (!owner.isDual) result.getOrPut(owner) { linkedSetOf() }.add(target) }
     else problems += Problem(from.toString(), spec, "Browser code imports Deno-only module ${relRoot(target)}: it $reason")
   }
 

@@ -13,6 +13,7 @@ The plugin scans the project for scopes:
 |---|---|---|
 | Deno | `deno.json(c)` with `imports`, `importMap` or `compilerOptions` (task-only configs are ignored) | Deno globals (`deno types`), DOM, import map as `paths`, real files for `jsr:` / `npm:` / `https:` |
 | Web | `package.json` + `tsconfig.json` | untouched (DOM, `node_modules`) |
+| Deno + package.json | a folder with both `deno.json` and `package.json` | `.tsx`/`.jsx` and files without Deno APIs stay on the folder's `tsconfig.json` (package.json / `node_modules`); Deno-only files move to `tsconfig.deno.json`. Bare imports listed in `package.json` resolve from `node_modules` on both sides |
 | Universal | files in a Deno scope that browser code imports and that use no Deno APIs / remote imports | DOM + ES only |
 
 For every Deno scope it writes `tsconfig.deno.json`:

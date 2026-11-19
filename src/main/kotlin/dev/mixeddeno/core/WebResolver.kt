@@ -5,11 +5,11 @@ import dev.mixeddeno.core.Json.str
 import java.nio.file.Path
 
 /** Resolves imports of a WEB scope through its tsconfig `paths` / `baseUrl` (and `extends` chain). */
-class WebResolver(private val scope: Scope) {
+class WebResolver(private val scope: Scope, config: Path = scope.config!!) {
   private val patterns = mutableListOf<Pair<String, List<Path>>>()
 
   init {
-    load(scope.config!!, 0)
+    load(config, 0)
   }
 
   private fun load(config: Path, depth: Int) {
