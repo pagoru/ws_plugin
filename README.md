@@ -32,7 +32,10 @@ Everything regenerates automatically when `deno.json`, `deno.lock`, `package.jso
 
 ## Setup
 
-1. Install the zip from the [releases](../../releases): Settings › Plugins › ⚙ › Install Plugin from Disk.
+1. Settings › Plugins › ⚙ › **Manage Plugin Repositories**, add
+   `https://github.com/pagoru/ws_plugin/releases/latest/download/updatePlugins.xml`,
+   then install **Mixed Deno Types** from the Marketplace tab. Updates then arrive like any other plugin.
+   (Or install the zip from the [releases](../../releases) with Install Plugin from Disk, without updates.)
 2. Set **Settings › Languages & Frameworks › Deno** to *Disable* for the project. The bundled Deno plugin
    would otherwise hand every file under a `deno.json` to the Deno LSP.
 3. Run **Tools › Mixed Deno Types › Configure tsconfig Files…** once. It:

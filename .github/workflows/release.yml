@@ -44,7 +44,20 @@ jobs:
         run: |
           V=${{ steps.v.outputs.version }}
           ZIP=$(ls build/distributions/*.zip | head -1)
-          gh release create "v$V" "$ZIP" \
+          NAME=$(basename "$ZIP")
+          cat > updatePlugins.xml <<XML
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plugins>
+            <plugin id="dev.mixeddeno.types"
+                    url="https://github.com/${{ github.repository }}/releases/download/v$V/$NAME"
+                    version="$V">
+              <idea-version since-build="263"/>
+              <name>Mixed Deno Types</name>
+            </plugin>
+          </plugins>
+          XML
+          sed -i 's/^          //' updatePlugins.xml
+          gh release create "v$V" "$ZIP" updatePlugins.xml \
             --target "${{ github.sha }}" \
             --title "Mixed Deno Types $V" \
-            --notes "Install in WebStorm: Settings | Plugins | ⚙ | Install Plugin from Disk… and pick $(basename "$ZIP")."
+            --notes "Install in WebStorm: Settings | Plugins | ⚙ | Manage Plugin Repositories, add https://github.com/${{ github.repository }}/releases/latest/download/updatePlugins.xml, then install Mixed Deno Types from the Marketplace tab (updates arrive automatically). Or Install Plugin from Disk with $NAME."
