@@ -1,0 +1,40 @@
+<idea-plugin>
+  <id>dev.mixeddeno.types</id>
+  <name>Mixed Deno Types</name>
+  <vendor>pagoru</vendor>
+  <description><![CDATA[
+<p>Correct TypeScript types for monorepos that mix Deno, Node and browser code, using WebStorm's own TypeScript service
+(no Deno LSP, no Deno workspaces).</p>
+<ul>
+<li>Every <code>deno.json</code> with an import map becomes a Deno scope with a generated <code>tsconfig.deno.json</code>:
+Deno globals (<code>deno types</code>), import map as <code>paths</code>, and real files for every <code>jsr:</code>, <code>npm:</code> and <code>https:</code> module.</li>
+<li>Shared code imported by browser apps gets a <code>tsconfig.universal.json</code>; Deno-only imports from browser code are reported.</li>
+<li>Tools | Mixed Deno Types: regenerate, or configure existing tsconfig files.</li>
+</ul>
+]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+  <depends>JavaScript</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <postStartupActivity implementation="dev.mixeddeno.ide.MixedDenoStartup"/>
+    <additionalLibraryRootsProvider implementation="dev.mixeddeno.ide.LibraryProvider"/>
+    <notificationGroup id="Mixed Deno Types" displayType="BALLOON"/>
+    <projectConfigurable parentId="language" instance="dev.mixeddeno.ide.SettingsConfigurable"
+                         id="dev.mixeddeno.settings" displayName="Mixed Deno Types"/>
+    <localInspection language="TypeScript" shortName="MixedDenoImports" displayName="Cross-runtime import problems"
+                     groupName="Mixed Deno Types" enabledByDefault="true" level="WARNING"
+                     implementationClass="dev.mixeddeno.ide.ImportInspection"/>
+    <localInspection language="TypeScript JSX" shortName="MixedDenoImportsTsx" displayName="Cross-runtime import problems (TSX)"
+                     groupName="Mixed Deno Types" enabledByDefault="true" level="WARNING"
+                     implementationClass="dev.mixeddeno.ide.ImportInspection"/>
+  </extensions>
+
+  <actions>
+    <group id="MixedDenoTypes.Group" text="Mixed Deno Types" popup="true">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+      <action id="MixedDenoTypes.Regenerate" class="dev.mixeddeno.ide.RegenerateAction" text="Regenerate Deno Types"/>
+      <action id="MixedDenoTypes.Configure" class="dev.mixeddeno.ide.ConfigureAction" text="Configure tsconfig Files…"/>
+    </group>
+  </actions>
+</idea-plugin>
