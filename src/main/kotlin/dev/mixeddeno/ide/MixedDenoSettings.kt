@@ -10,6 +10,7 @@ import com.intellij.openapi.project.Project
 class MixedDenoState : BaseState() {
   var denoPath by string("")
   var autoGenerate by property(true)
+  var autoConfigure by property(true)
 }
 
 @Service(Service.Level.PROJECT)

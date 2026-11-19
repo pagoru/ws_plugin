@@ -17,6 +17,10 @@ class SettingsConfigurable(private val project: Project) : BoundConfigurable("Mi
           .comment("Leave empty to use deno from PATH or ~/.deno/bin")
       }
       row {
+        checkBox("Make Deno scopes' tsconfig.json extend the generated tsconfig.deno.json automatically")
+          .bindSelected({ state.autoConfigure }, { state.autoConfigure = it })
+      }
+      row {
         checkBox("Regenerate types automatically when deno.json, tsconfig.json or imports change")
           .bindSelected({ state.autoGenerate }, { state.autoGenerate = it })
       }

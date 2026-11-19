@@ -20,13 +20,28 @@ class Configurer(private val root: Path) {
     "allowImportingTsExtensions", "noEmit",
   )
 
-  fun run(): List<String> {
+  /** @param web also adjust browser tsconfigs (include src, vite/client types, tsconfig.node.json). */
+  fun run(web: Boolean = true): List<String> {
     val ws = Workspace.scan(root)
     for (s in ws.scopes) when (s.kind) {
       ScopeKind.DENO -> configureDeno(s)
-      ScopeKind.WEB -> configureWeb(s)
+      ScopeKind.WEB -> if (web) configureWeb(s)
     }
+    if (ws.scopes.any { it.kind == ScopeKind.DENO }) updateGitignore()
     return changes
+  }
+
+  private fun updateGitignore() {
+    val gi = root.resolve(".gitignore")
+    if (!gi.exists() && !root.resolve(".git").exists()) return
+    val text = if (gi.exists()) Files.readString(gi) else ""
+    val lines = text.lines().map { it.trim() }
+    val wanted = listOf("${Generator.OUT_DIR}/", "**/${Generator.DENO_TSCONFIG}", "**/${Generator.UNIVERSAL_TSCONFIG}")
+    val missing = wanted.filter { it !in lines }
+    if (missing.isEmpty()) return
+    val prefix = if (text.isEmpty() || text.endsWith("\n")) "" else "\n"
+    Files.writeString(gi, text + prefix + "# Mixed Deno Types (generated, machine-specific)\n" + missing.joinToString("\n") + "\n")
+    changes += "updated .gitignore"
   }
 
   private fun rel(p: Path) = root.relativize(p).toString().replace('\\', '/')
@@ -40,9 +55,17 @@ class Configurer(private val root: Path) {
       return
     }
     val json = Json.readObject(file) ?: return
-    if (json.str("extends") == extends) return
+    val current = json.get("extends")
+    val currentList = when {
+      current == null -> emptyList()
+      current.isJsonArray -> current.asJsonArray.map { it.asString }
+      else -> listOf(current.asString)
+    }
+    if (extends in currentList && json.obj("compilerOptions")?.keySet()?.none { it in denoOwned } != false) return
     val out = JsonObject()
-    out.addProperty("extends", extends)
+    val others = currentList.filter { it != extends }
+    if (others.isEmpty()) out.addProperty("extends", extends)
+    else out.add("extends", Json.array(others + extends))
     val hasTsx = scope.files.any { it.extension == "tsx" }
     json.obj("compilerOptions")?.let { co ->
       val kept = JsonObject()

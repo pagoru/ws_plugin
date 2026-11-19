@@ -36,19 +36,18 @@ Everything regenerates automatically when `deno.json`, `deno.lock`, `package.jso
    `https://github.com/pagoru/ws_plugin/releases/latest/download/updatePlugins.xml`,
    then install **Mixed Deno Types** from the Marketplace tab. Updates then arrive like any other plugin.
    (Or install the zip from the [releases](../../releases) with Install Plugin from Disk, without updates.)
-2. Set **Settings › Languages & Frameworks › Deno** to *Disable* for the project. The bundled Deno plugin
-   would otherwise hand every file under a `deno.json` to the Deno LSP.
-3. Run **Tools › Mixed Deno Types › Configure tsconfig Files…** once. It:
+2. Open the project. On startup the plugin automatically:
+   - turns off the bundled Deno LSP for the project (it would otherwise take every file under a `deno.json`),
    - makes each Deno scope's `tsconfig.json` extend `./tsconfig.deno.json` (creating it if missing) and removes
-     `lib`, `types`, `paths`, `baseUrl`, `target` and `module` options that would override it,
-   - limits browser tsconfigs to `src` with `vite/client` types and adds `tsconfig.node.json` for `vite.config.ts`.
-4. Add to `.gitignore`:
-   ```
-   .deno-types/
-   tsconfig.deno.json
-   tsconfig.universal.json
-   ```
-   (`.deno-types` gets its own `.gitignore` too.) The generated files contain paths to your local Deno cache.
+     `lib`, `types`, `paths`, `baseUrl`, `target` and `module` options that would override it
+     (WebStorm always uses the nearest `tsconfig.json`, so this is required),
+   - adds `.deno-types/`, `**/tsconfig.deno.json`, `**/tsconfig.universal.json` to `.gitignore`
+     (generated files contain paths to your local Deno cache),
+   - generates the types.
+
+   Automatic tsconfig changes can be turned off in Settings › Languages & Frameworks › Mixed Deno Types.
+3. Optional: **Tools › Mixed Deno Types › Configure tsconfig Files…** also limits browser tsconfigs to `src`
+   with `vite/client` types and adds `tsconfig.node.json` for `vite.config.ts`.
 
 Deno must be installed (PATH, `~/.deno/bin`, or set in the plugin settings).
 

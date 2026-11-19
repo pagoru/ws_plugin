@@ -32,6 +32,7 @@ class MixedDenoService(private val project: Project) : Disposable {
   private val running = AtomicBoolean(false)
   @Volatile private var pending = false
   @Volatile private var lastFingerprint: String? = null
+  @Volatile private var notifiedOnce = false
 
   @Volatile var problemsByFile: Map<String, List<Problem>> = emptyMap(); private set
   @Volatile var externalRoots: Set<Path> = emptySet(); private set
@@ -79,6 +80,10 @@ class MixedDenoService(private val project: Project) : Disposable {
             notify("Deno executable not found. Set it in Settings | Languages & Frameworks | Mixed Deno Types.", NotificationType.WARNING)
             return
           }
+          if (MixedDenoSettings.get(project).state.autoConfigure) {
+            val changes = Configurer(root).run(web = false)
+            if (changes.isNotEmpty()) notify("Configured for Deno types:<br>" + changes.joinToString("<br>"), NotificationType.INFORMATION)
+          }
           indicator.text = "Resolving jsr:/npm: modules with deno info"
           val result = Generator(root, DenoProcess(deno)).run()
           lastFingerprint = fp
@@ -95,7 +100,8 @@ class MixedDenoService(private val project: Project) : Disposable {
             }, project.disposed)
           }
           val errors = result.log.filter { it.startsWith("ERROR") }
-          if (interactive || errors.isNotEmpty()) {
+          if (interactive || errors.isNotEmpty() || !notifiedOnce) {
+            notifiedOnce = true
             notify(
               (if (errors.isEmpty()) "Deno types generated" else "Deno types generated with errors") +
                 ":<br>" + result.log.joinToString("<br>") +
